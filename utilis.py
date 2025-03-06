@@ -2,66 +2,12 @@ from tkinter.tix import TCL_TIMER_EVENTS
 import torch
 from torch.utils.data import random_split, Subset
 from torch_geometric.loader import DataLoader
-from torch_geometric.data import Data
+
 import numpy as np
 from scipy.spatial.distance import pdist, squareform
-from torch_geometric.utils import dense_to_sparse
 import math
 
 eps = 1e-8
-def load_dataset(graph):
-    print('loading data')
-    num_graphs=graph["label"].size
-    label1=graph["label"]
-    label=np.append(label1,label1)
-    data_list = []
-    for i in range(num_graphs):
-        node_features = torch.FloatTensor(graph["graph_struct"][0][i][1])
-        tepk = node_features.reshape(-1,1)
-        tepk, indices = torch.sort(abs(tepk), dim=0, descending=True)
-        mk = tepk[int(node_features.shape[0] * node_features.shape[0] * 0.2 - 1)]
-        edge = torch.Tensor(np.where(node_features > mk, 1, 0))
-        data_example = Data(x=node_features,edge_index=dense_to_sparse(edge)[0],y=label[i])
-        data_list.append(data_example)
-
-    return data_list
-
-
-def get_dataloader(dataset, batch_size, random_split_flag=True, data_split_ratio=None, seed=None):
-    """
-    Args:
-        dataset:
-        batch_size: int
-        random_split_flag: bool
-        data_split_ratio: list, training, validation and testing ratio
-        seed: random seed to split the dataset randomly
-    Returns:
-        a dictionary of training, validation, and testing dataLoader
-    """
-
-    if not random_split_flag and hasattr(dataset, 'supplement'):
-        assert 'split_indices' in dataset.supplement.keys(), "split idx"
-        split_indices = dataset.supplement['split_indices']
-        train_indices = torch.where(split_indices == 0)[0].numpy().tolist()
-        dev_indices = torch.where(split_indices == 1)[0].numpy().tolist()
-        test_indices = torch.where(split_indices == 2)[0].numpy().tolist()
-
-        train = Subset(dataset, train_indices)
-        eval = Subset(dataset, dev_indices)
-        test = Subset(dataset, test_indices)
-    else:
-        num_train = int(data_split_ratio[0] * len(dataset))
-        num_eval = int(data_split_ratio[1] * len(dataset))
-        num_test = len(dataset) - num_train - num_eval
-
-        train, eval, test = random_split(dataset, lengths=[num_train, num_eval, num_test],
-                                         generator=torch.Generator().manual_seed(seed))
-
-    dataloader = dict()
-    dataloader['train'] = DataLoader(train, batch_size=batch_size, shuffle=True)
-    dataloader['eval'] = DataLoader(eval, batch_size = num_eval, shuffle=False)
-    dataloader['test'] = DataLoader(test, batch_size = num_test, shuffle=False)
-    return dataloader
 
 def pairwise_distances(x):
     #x should be two dimensional
@@ -88,8 +34,7 @@ def calculate_gram_mat(x):
     #dist = dist/torch.max(dist)
     return torch.exp(-dist /sigma)
 
-def reyi_entropy(x):
-    alpha = 1.8
+def reyi_entropy(x, alpha=1.8):
     k = calculate_gram_mat(x)
     k = k/(torch.trace(k)+eps)
     eigv = torch.abs(torch.linalg.eigh(k)[0])

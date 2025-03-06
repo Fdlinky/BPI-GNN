@@ -19,12 +19,12 @@ class Prot_subgraph(nn.Module):
         super(Prot_subgraph, self).__init__()
         self.encoder = encoder
         self.decoder = decoder
-        self.input_dim =116
+        self.input_dim =110
         self.classifier = classifier
         self.device = device
         self.GVAE_hidden_dim = GVAE_hidden_dim
         self.num_prototypes = num_prototypes
-        self.output_dim = 2
+        self.output_dim = 3
         self.prototype_shape = (self.num_prototypes, 128)
         self.prototype_vectors = nn.Parameter(torch.rand(self.prototype_shape),
                                               requires_grad=True)
@@ -130,6 +130,8 @@ class Prot_subgraph(nn.Module):
             entropy_loss += ent.mean()
 
         prototype_activations = torch.cat(tuple(similarity),dim = 1)
+        # 获取原型分配结果（每个样本对应的原型索引）
+        cluster_assignment = torch.argmax(prototype_activations, dim=1)
         prototype_edge = torch.cat(tuple(prototype_edge),dim = 1)
         distance = torch.cat(tuple(distance),dim = 1)
         # print(prototype_activations.shape)
@@ -141,4 +143,4 @@ class Prot_subgraph(nn.Module):
         loss = criterion(logits, labels) + 0.0001 * (sparse_loss + entropy_loss) +  lambda2 * sim_loss 
         # loss = criterion(logits, labels)
         # return prototype_edge , distance, prototype_activations
-        return logits, loss
+        return logits, loss, prototype_activations, cluster_assignment

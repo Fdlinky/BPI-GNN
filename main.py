@@ -8,6 +8,7 @@ import numpy as np
 import os
 import time
 import random
+import pickle
 from tqdm import tqdm
 from scipy.io import loadmat
 from typing import List
@@ -46,8 +47,8 @@ parser.add_argument("--mlp_hidden", type=int, default=  [128,128], help="mlp hid
 parser.add_argument("--GVAE_hidden_dim", type = int, default= 120, help="mlp hidden dims")
 parser.add_argument("--mi_weight", type=float, default= 0.001, help="classifier hidden dims")
 parser.add_argument("--weight_decay", type=float, default=0.0001, help="Adam weight decay. Default is 5*10^-5.")
-parser.add_argument("--input_dim", type=int, default=116)
-parser.add_argument("--output_dim", type=int, default=2)
+parser.add_argument("--input_dim", type=int, default=110)
+parser.add_argument("--output_dim", type=int, default=3)
 parser.add_argument("--lambda1", type=float, default=0.001)
 parser.add_argument("--lambda2", type=float, default=0.001)
 parser.add_argument("--lambda3", type=float, default=0.001)
@@ -62,11 +63,11 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed_all(0)
 
 # --- load data ---
-from utilis import get_dataloader,load_dataset
-graph_filename = "data/ABIDE.mat"
-graph = loadmat(graph_filename)
-dataset = load_dataset(graph)
-dataloader = get_dataloader(dataset, args.batch_size, data_split_ratio=args.data_split_ratio, seed=args.seed)
+from prepare_data import get_dataloader,load_dataset
+graph_filename = "../data/pyg_dataset.pkl"
+pyg_dataset = pickle.load(open(graph_filename, "rb"))
+#dataset = load_dataset(pyg_dataset)
+dataloader = get_dataloader(pyg_dataset, args.batch_size, data_split_ratio=args.data_split_ratio, seed=args.seed)
 
 # --- train/load GCE ---
 from GraphVAE import GraphEncoder,GraphDecoder
@@ -80,55 +81,57 @@ model = GINNet(args.input_dim, args.output_dim, args, device).to(device)
 SG_model = Prot_subgraph(device, encoder, decoder, model, args.GVAE_hidden_dim, args.num_prototypes, args.dropout).to(device)
 
 
-def train(args, model, device, train_graphs, eval_graphs,test_graphs, SG_model,opt,optimizer, k, num_prototype):
-
+def train_0(args, model, device, train_graphs, SG_model,opt):
     model.eval()
     SG_model.eval()
     encoder.train()
     decoder.train()
-    if k<20:
-        for graph in train_graphs: 
-            x, edge_index, batch = graph.x.to(device), graph.edge_index.to(device), graph.batch.to(device)
-            z, mu, logvar= encoder(graph)
-            Xhat, adj = decoder(z)
-            # #print(Xhat.shape)
-            nll = VAE_LL_loss(graph.x, Xhat, logvar, mu, device)
-            graph_prot = torch.zeros(args.num_prototypes, len(z[:,0]),round(args.GVAE_hidden_dim /args.num_prototypes)).to(device)
-            for k in range(args.num_prototypes):
-                prot_size_up = round(args.GVAE_hidden_dim * k/args.num_prototypes)
-                prot_size_de = round(args.GVAE_hidden_dim * (k+1)/args.num_prototypes)
-                edge = z[:,prot_size_up:prot_size_de]
-                print(edge.shape)
-                graph_prot[k,:,:]= edge
-            TC_loss = Calculate_TC(graph_prot, args.num_prototypes)
-            prototype_loss = nll + 0.001 * TC_loss
-            print(prototype_loss)
-            if opt is not None:
-                opt.zero_grad()
-                prototype_loss.backward()    
-                opt.step()
-    else:
+    for graph in train_graphs: 
+        x, edge_index, batch = graph.x.to(device), graph.edge_index.to(device), graph.batch.to(device)
+        z, mu, logvar= encoder(graph)
+        Xhat, adj = decoder(z)
+        # #print(Xhat.shape)
+        nll = VAE_LL_loss(graph.x, Xhat, logvar, mu, device)
+        graph_prot = torch.zeros(args.num_prototypes, len(z[:,0]),round(args.GVAE_hidden_dim /args.num_prototypes)).to(device)
+        for k in range(args.num_prototypes):
+            prot_size_up = round(args.GVAE_hidden_dim * k/args.num_prototypes)
+            prot_size_de = round(args.GVAE_hidden_dim * (k+1)/args.num_prototypes)
+            edge = z[:,prot_size_up:prot_size_de]
+            #print(edge.shape)
+            graph_prot[k,:,:]= edge
+        TC_loss = Calculate_TC(graph_prot, args.num_prototypes)
+        prototype_loss = nll + 0.001 * TC_loss
+        #print(prototype_loss)
+        if opt is not None:
+            opt.zero_grad()
+            prototype_loss.backward()    
+            opt.step()
+
+def train_20(args, model, device, train_graphs, eval_graphs, test_graphs, SG_model,opt,optimizer, num_prototype, log_file, epoch):
         model.train()
         SG_model.train()
         encoder.train()
         decoder.train()
         acc_accum = 0
         num = 0
+        labels_train = []
+        cluster_assignments_train = []
         for graph in train_graphs: 
             x, edge_index, batch = graph.x.to(device), graph.edge_index.to(device), graph.batch.to(device)
-            logits, loss = SG_model(graph,args.lambda2)
+            logits, loss, prototype_activations, cluster_assignment = SG_model(graph,args.lambda2)
 
             if optimizer is not None:
                 optimizer.zero_grad()
                 loss.backward()      
                 optimizer.step()
-            
 
             loss = loss.detach().cpu().numpy()
             pred = logits.max(1, keepdim=True)[1]
-            labels = torch.LongTensor(graph.y).to(device)
-            print(pred.shape)
-            print(labels.shape)
+            labels = graph.y.clone().detach().to(device)
+            labels_train.append(labels.cpu().numpy())
+            cluster_assignments_train.append(cluster_assignment.cpu().numpy())
+            #print(pred.shape)
+            #print(labels.shape)
             correct = pred.eq(labels.view_as(pred)).sum().cpu().item()
             acc = correct / float(len(graph.y))
             acc_accum = acc_accum + acc
@@ -138,53 +141,88 @@ def train(args, model, device, train_graphs, eval_graphs,test_graphs, SG_model,o
         print("classification loss: %f" %(loss))
         print("accuracy train: %f" %(acc_train))
         
-        acc_eval = evaluate(args, eval_graphs, model, SG_model, device)
-        print("accuracy test: %f" %(acc_eval))
+        acc_eval, cluster_assignments_eval, labels_eval = evaluate(args, eval_graphs, model, SG_model, device)
+        print("accuracy eval: %f" %(acc_eval))
+        np.savez(f'../context/eval_cluster_assignments_fold_{fold_idx}.npz',
+            assignments=cluster_assignments_eval,
+            labels=labels_eval)
 
-        acc_test, sen_test, spc_test, prc_test, f1s_test, mcc_test = test(args, test_graphs, model, SG_model, device)
-        print("accuracy test: %f" %(acc_test))
+        #acc_test, sen_test, spc_test, prc_test, f1s_test, mcc_test, cluster_assignments_test, labels_test = test(args, test_graphs, model, SG_model, device)
+        # np.savez(f'test_cluster_assignments_fold_{fold_idx}.npz',
+        #     assignments=cluster_assignments_test,
+        #     labels=labels_test)
+        # print("accuracy test: %f" %(acc_test))
 
-        filename="ABIDE3.txt"
-        if not os.path.exists(filename):
-            with open(filename, 'w') as f:
-                f.write("%f %f %f %f %f %f %f %f %f" % (loss, acc_train, acc_eval, acc_test, sen_test, spc_test, prc_test, f1s_test, mcc_test))
-                f.write("\n")
-        else:
-            with open(filename, 'a+') as f:
-                f.write("%f %f %f %f %f %f %f %f %f" % (loss, acc_train, acc_eval, acc_test, sen_test, spc_test, prc_test, f1s_test, mcc_test))
-                f.write("\n")
+        with open(log_file, 'a+') as f:
+            f.write("Epoch %d, loss: %f, acc_train: %f, acc_eval: %f\n" % (epoch, loss, acc_train, acc_eval))
+        # if not os.path.exists(filename):
+        #     with open(filename, 'w') as f:
+        #         f.write("loss acc_train acc_eval acc_test sen_test spc_test prc_test f1s_test mcc_test")
+        #         f.write("\n")
+        #         f.write("%f %f %f %f %f %f %f %f %f" % (loss, acc_train, acc_eval, acc_test, sen_test, spc_test, prc_test, f1s_test, mcc_test))
+        #         f.write("\n")
+        # else:
+        #     with open(filename, 'a+') as f:
+        #         f.write("%f %f %f %f %f %f %f %f %f" % (loss, acc_train, acc_eval, acc_test, sen_test, spc_test, prc_test, f1s_test, mcc_test))
+        #         f.write("\n")
 
-        return loss
+        return logits, loss, prototype_activations, cluster_assignments_train, labels_train
 
-def evaluate(args, data, model, SG_model, device): 
+def evaluate(args, data, model, SG_model, device):
+    model.eval()
+    SG_model.eval()
 
     acc_accum = 0
     num = 0
-    for graph in data: 
+    all_cluster_assignments = []
+    all_labels = []
+    for graph in data:
         x, edge_index, batch = graph.x.to(device), graph.edge_index.to(device), graph.batch.to(device)
-        logits, loss = SG_model(graph, args.lambda2)
+        logits, loss, prototype_activations, cluster_assignment= SG_model(graph, args.lambda2)
+        all_cluster_assignments.append(cluster_assignment.cpu().numpy())
         pred = logits.max(1, keepdim=True)[1]
-        labels = torch.LongTensor(graph.y).to(device)
+        labels = graph.y.clone().detach().to(device)
+        all_labels.append(labels.cpu().numpy())
         correct = pred.eq(labels.view_as(pred)).sum().cpu().item()
         acc = correct / float(len(graph.y))
-        acc_accum = acc_accum + acc
-        num = num + 1
-    acc_test = acc_accum/num
+        acc_accum += acc
+        num += 1
 
-    return acc_test
+    return acc_accum / num, np.concatenate(all_cluster_assignments), np.concatenate(all_labels)
 
 def calc_performance_statistics(y_pred, y):
-
-    TN, FP, FN, TP = confusion_matrix(y, y_pred).ravel()
-    N = TN + TP + FN + FP
-    S = (TP + FN) / N
-    P = (TP + FP) / N
-    acc = (TN + TP) / N
-    sen = TP / (TP + FN)
-    spc = TN / (TN + FP)
-    prc = TP / (TP + FP)
-    f1s = 2 * (prc * sen) / (prc + sen)
-    mcc = (TP / N - S * P) / np.sqrt(P * S * (1 - S) * (1 - P))
+    # 计算混淆矩阵
+    cm = confusion_matrix(y, y_pred)
+    num_classes = cm.shape[0]  # 类别数
+    
+    # 初始化全局统计量
+    TN_total = 0
+    FP_total = 0
+    FN_total = 0
+    TP_total = 0
+    
+    # 对每个类别计算 TP, FP, FN, TN
+    for i in range(num_classes):
+        TP = cm[i, i]
+        FP = cm[:, i].sum() - TP
+        FN = cm[i, :].sum() - TP
+        TN = cm.sum() - TP - FP - FN
+        
+        TN_total += TN
+        FP_total += FP
+        FN_total += FN
+        TP_total += TP
+    
+    # 计算全局指标
+    N = TN_total + TP_total + FN_total + FP_total
+    S = (TP_total + FN_total) / N
+    P = (TP_total + FP_total) / N
+    acc = (TN_total + TP_total) / N
+    sen = TP_total / (TP_total + FN_total) if (TP_total + FN_total) != 0 else 0
+    spc = TN_total / (TN_total + FP_total) if (TN_total + FP_total) != 0 else 0
+    prc = TP_total / (TP_total + FP_total) if (TP_total + FP_total) != 0 else 0
+    f1s = 2 * (prc * sen) / (prc + sen) if (prc + sen) != 0 else 0
+    mcc = (TP_total / N - S * P) / np.sqrt(P * S * (1 - S) * (1 - P)) if (P * S * (1 - S) * (1 - P)) != 0 else 0
 
     return acc, sen, spc, prc, f1s, mcc
 
@@ -200,16 +238,20 @@ def test(args, data, model, SG_model, device):
     f1s_accum = 0
     mcc_accum = 0
     num = 0
-
+    all_cluster_assignments = []
+    all_labels = []
     for graph in data: 
         x, edge_index, batch = graph.x.to(device), graph.edge_index.to(device), graph.batch.to(device)
-        logits, loss = SG_model(graph,args.lambda2)
+        logits, loss, prototype_activations, cluster_assignment = SG_model(graph, args.lambda2)
         #compute gradient
         pred = logits.max(1, keepdim=True)[1]
-        labels = torch.LongTensor(graph.y).to(device)
+        labels = graph.y.clone().detach().to(device)
         correct = pred.eq(labels.view_as(pred)).sum().cpu().item()
         pred = pred.cpu().numpy()
         labels = labels.cpu().numpy()
+         # 保存结果到列表
+        all_cluster_assignments.append(cluster_assignment.cpu().numpy())
+        all_labels.append(labels)
         if len(labels)>1:
             test_acc, test_sen, test_spc, test_prc, test_f1s, test_mcc = calc_performance_statistics(pred,labels)
             acc = correct / float(len(graph.y))
@@ -226,8 +268,10 @@ def test(args, data, model, SG_model, device):
         prc_test = prc_accum/num
         f1s_test = f1s_accum/num
         mcc_test = mcc_accum/num
+        print(f"test accuracy: {acc_test}")
 
-    return acc_test, sen_test, spc_test, prc_test, f1s_test, mcc_test
+    return acc_test, sen_test, spc_test, prc_test, f1s_test, mcc_test, np.concatenate(all_cluster_assignments), np.concatenate(all_labels)
+
 
 for  fold_idx in range(0,3):
 
@@ -236,18 +280,37 @@ for  fold_idx in range(0,3):
     model = GINNet(args.input_dim, args.output_dim, args, device).to(device)
     SG_model = Prot_subgraph(device, encoder, decoder, model, args.GVAE_hidden_dim, args.num_prototypes, args.dropout).to(device)
 
-    dataloader = get_dataloader(dataset, args.batch_size, data_split_ratio=args.data_split_ratio, seed=random.randint(0,1000))
+    dataloader = get_dataloader(pyg_dataset, args.batch_size, data_split_ratio=args.data_split_ratio, seed=random.randint(0,1000))
 
     opt_params = list(decoder.parameters()) + list(encoder.parameters())
-    opt = torch.optim.Adam(opt_params, lr=args.lr , weight_decay=5e-4)
+    opt = torch.optim.Adam(opt_params, lr=args.lr , weight_decay=args.weight_decay)
     params = list(model.parameters()) + list(SG_model.parameters())
-    optimizer = torch.optim.Adam( params, lr =args.lr , weight_decay=5e-4)
+    optimizer = torch.optim.Adam( params, lr =args.lr , weight_decay=args.weight_decay)
 
     scheduler = optim.lr_scheduler.StepLR(opt, step_size=50, gamma=0.5)
 
+    log_file = f"../context/trainLog_{fold_idx}.txt"
+
     for epoch in range(1, args.epochs + 1):
-        
+        print('Epoch: {}'.format(epoch))
+        if epoch >=20:
+            logits, avg_loss, prototype_activations, cluster_assignments_train, labels_train = \
+            train_20(args, model, device,  dataloader['train'],dataloader['eval'],dataloader['test'], SG_model,opt,optimizer, args.num_prototypes, log_file, epoch)
+        else:
+            train_0(args, model, device,  dataloader['train'], SG_model, opt)
 
-        avg_loss = train(args, model, device,  dataloader['train'],dataloader['eval'],dataloader['test'], SG_model,opt,optimizer,epoch, args.num_prototypes)
-
+        if epoch == args.epochs:  # 仅保存最后一个 epoch 的结果
+            np.savez(f'../context/train_cluster_assignments_fold_{fold_idx}.npz',
+                 assignments=cluster_assignments_train,
+                 labels=labels_train)
         scheduler.step()
+    
+    acc_test, sen_test, spc_test, prc_test, f1s_test, mcc_test, cluster_assignments_test, labels_test = test(args, dataloader['test'], model, SG_model, device)
+    np.savez(f'../context/test_cluster_assignments_fold_{fold_idx}.npz',
+        assignments=cluster_assignments_test,
+        labels=labels_test)
+    print("accuracy test: %f" %(acc_test))
+    with open(log_file, 'a+') as f:
+        f.write("acc_test: %f, sen_test: %f, spc_test: %f, prc_test: %f, f1s_test: %f, mcc_test: %f \n\n" \
+                % (acc_test, sen_test, spc_test, prc_test, f1s_test, mcc_test))
+

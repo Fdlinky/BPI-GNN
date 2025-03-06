@@ -25,7 +25,7 @@ class GraphEncoder(torch.nn.Module):
 
     def forward(self, data):
         x, edge_index = data.x.to(self.device), data.edge_index.to(self.device)
-        mu, logvar = self.encode(x,edge_index)
+        mu, logvar = self.encode(x, edge_index)
         z = self.reparametrize(mu, logvar)
         return z, mu, logvar
 
