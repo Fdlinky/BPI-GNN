@@ -16,16 +16,16 @@ class GraphEncoder(torch.nn.Module):
         self.conv_logstd = GCNConv(2 * out_channels, out_channels)
         self.device = device
 
-    def encode(self, x, edge_index):
-        x = self.conv1(x, edge_index)
-        return self.conv_mu(x, edge_index), self.conv_logstd(x, edge_index)
+    def encode(self, x, edge_index, edge_weight=None):
+        x = self.conv1(x, edge_index, edge_weight)
+        return self.conv_mu(x, edge_index, edge_weight), self.conv_logstd(x, edge_index, edge_weight)
 
     def reparametrize(self, mu, logstd):
         return mu + torch.randn_like(logstd) * torch.exp(logstd)
 
     def forward(self, data):
-        x, edge_index = data.x.to(self.device), data.edge_index.to(self.device)
-        mu, logvar = self.encode(x, edge_index)
+        x, edge_index, edge_weight = data.x.to(self.device), data.edge_index.to(self.device), data.edge_weight.to(self.device)
+        mu, logvar = self.encode(x, edge_index, edge_weight)
         z = self.reparametrize(mu, logvar)
         return z, mu, logvar
 

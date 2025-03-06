@@ -76,15 +76,15 @@ class GINNet(nn.Module):
     #     x = torch.cat([x, r], dim=-1)
     #     return x
 
-    def forward(self, x, edge_attr, batch,edge_weight = None):
+    def forward(self, x, edge_index, batch, edge_weight = None):
         
         # x = self.random_feature(x)
-        x,edge_attr = x.to(self.device),edge_attr.to(self.device)
+        x, edge_index, edge_weight = x.to(self.device), edge_index.to(self.device), edge_weight.to(self.device)
         for i in range(self.num_gnn_layers):
             if edge_weight == None:
-                x = self.gnn_layers[i](x, edge_attr)
+                x = self.gnn_layers[i](x, edge_index)
             else:
-                x = self.gnn_layers[i](x, edge_attr, edge_weight)
+                x = self.gnn_layers[i](x, edge_index, edge_weight)
             if self.emb_normlize:
                 x = F.normalize(x, p=2, dim=-1)
             x = self.gnn_non_linear(x)
