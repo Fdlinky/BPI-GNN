@@ -72,7 +72,7 @@ def load_dataset(graph):
         tepk, indices = torch.sort(abs(tepk), dim=0, descending=True)
         mk = tepk[int(node_features.shape[0] * node_features.shape[0] * 0.2 - 1)]
         edge = torch.Tensor(np.where(node_features > mk, 1, 0))
-        data_example = Data(x=node_features,edge_index=dense_to_sparse(edge)[0],y=label[i])
+        data_example = Data(x=node_features,edge_index=dense_to_sparse(edge)[0],y=labels[i])
         data_list.append(data_example)
 
     return data_list
