@@ -6,7 +6,9 @@ import pickle
 import torch
 from torch.utils.data import random_split, Subset
 from torch_geometric.utils import dense_to_sparse
-from torch_geometric.data import Data, DataLoader
+from torch_geometric.data import Data
+from torch_geometric.loader import DataLoader
+from sklearn.model_selection import train_test_split
 
 class Sample:
     def __init__(self, sample_id, group_attr, func_conn_path=None, stru_conn_path=None):
@@ -72,7 +74,7 @@ def load_dataset(graph):
         tepk, indices = torch.sort(abs(tepk), dim=0, descending=True)
         mk = tepk[int(node_features.shape[0] * node_features.shape[0] * 0.2 - 1)]
         edge = torch.Tensor(np.where(node_features > mk, 1, 0))
-        data_example = Data(x=node_features,edge_index=dense_to_sparse(edge)[0],y=label[i])
+        data_example = Data(x=node_features,edge_index=dense_to_sparse(edge)[0],y=labels[i])
         data_list.append(data_example)
 
     return data_list
@@ -104,9 +106,16 @@ def get_dataloader(dataset, batch_size, random_split_flag=True, data_split_ratio
         num_eval = int(data_split_ratio[1] * len(dataset))
         num_test = len(dataset) - num_train - num_eval
 
-        train, eval, test = random_split(dataset, lengths=[num_train, num_eval, num_test],
-                                         generator=torch.Generator().manual_seed(seed))
+        # train, eval, test = random_split(dataset, lengths=[num_train, num_eval, num_test],
+        #                                  generator=torch.Generator().manual_seed(seed))
+        train_indices, test_indices = train_test_split(
+            range(len(dataset)), test_size=data_split_ratio[2], random_state=seed)
+        train_indices, eval_indices = train_test_split(
+            train_indices, test_size=data_split_ratio[1] / (data_split_ratio[0] + data_split_ratio[1]), random_state=seed)
 
+        train = Subset(dataset, train_indices)
+        eval = Subset(dataset, eval_indices)
+        test = Subset(dataset, test_indices)
     dataloader = dict()
     dataloader['train'] = DataLoader(train, batch_size=batch_size, shuffle=True)
     dataloader['eval'] = DataLoader(eval, batch_size = num_eval, shuffle=False)
@@ -137,17 +146,19 @@ def create_pyg_data(sample, all_seg_ids, indices_to_remove, device):
     tepk, indices = torch.sort(abs(tepk), dim=0, descending=True)
     mk = tepk[int(x.shape[0] * x.shape[0] * 0.2 - 1)]
     edge = torch.Tensor(np.where(x > mk, 1, 0))
+
     # 构建连接图的边索引
     #edge_index = torch.tensor([(i, j) for i in range(num_nodes) for j in range(num_nodes)], dtype=torch.long).t().contiguous().to(device)
-    
+    edge_weight = torch.Tensor(np.where(x > mk, stru_conn + 1e-7, 0))
     # 构建标签
     label = 0 if sample.group_attr == 'ASD' \
         else 1 if sample.group_attr == 'FXS'\
             else 2
     y = torch.tensor([label], dtype=torch.long)
+    ew = (dense_to_sparse(edge_weight)[1]-(1e-7)).view(-1, 1)
     
     # 返回 PyG Data 对象
-    return Data(x=x, edge_index=dense_to_sparse(edge)[0], y=y)
+    return Data(x=x, edge_index=dense_to_sparse(edge)[0], edge_weight=ew, y=y, id=sample.sample_id)
 
 def align_features(sample, all_seg_ids):
     features = np.zeros((len(all_seg_ids), 3), dtype=np.float32)
@@ -191,10 +202,10 @@ def load_seg_id_mapping(harvard_oxford_path):
 
 if __name__ == "__main__":
     # 加载数据集
-    with open('../data/dataset_SFvsc.pkl', 'rb') as f:
+    with open('data/dataset_SFvsc.pkl', 'rb') as f:
         dataset = pickle.load(f)
 
-    data_path = '../data/HOA_atlas/HarvardOxford_Atlas_NewIndex_YCG.xlsx'
+    data_path = 'data/HOA_atlas/HarvardOxford_Atlas_NewIndex_YCG.xlsx'
     # 提取所有SegId
     seg_id_to_name = load_seg_id_mapping(data_path)
     all_seg_ids = sorted(seg_id_to_name.keys())
@@ -214,4 +225,4 @@ if __name__ == "__main__":
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     pyg_dataset = [create_pyg_data(sample, all_seg_ids, indices_to_remove, device) for sample in valid_samples]
-    pickle.dump(pyg_dataset, open('../data/pyg_dataset.pkl', 'wb'))
+    pickle.dump(pyg_dataset, open('data/mm_dataset.pkl', 'wb'))

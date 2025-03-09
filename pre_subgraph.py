@@ -90,7 +90,7 @@ class Prot_subgraph(nn.Module):
         entropy_loss = 0
         sim_loss = 0
         prototype_edge = []
-        edge_index, batch,x = graph.edge_index.to(self.device), graph.batch.to(self.device), graph.x.to(self.device)
+        edge_index, batch,x, edge_weight = graph.edge_index.to(self.device), graph.batch.to(self.device), graph.x.to(self.device), graph.edge_weight.to(self.device)
         # logits, probs, node_emb, graph_emb, _ = self.classifier(x,edge_index,batch)
         z, mu, logvar= self.encoder(graph)
         #Xhat, adj = self.decoder(z)
@@ -117,7 +117,7 @@ class Prot_subgraph(nn.Module):
             aedge =  torch.sigmoid(F.gumbel_softmax(aedge,tau = 0.1))
             self.clear_masks(self.classifier)
             self.set_masks(self.classifier, aedge)
-            _, prot_emb,_ = self.classifier(x,edge_index,batch)
+            _, prot_emb,_ = self.classifier(x,edge_index,batch, edge_weight)
             sim = torch.norm(prot_emb - self.prototype_vectors[k])
             sim_loss += sim
             similarity1, distance1 = self.prototype_subgraph_similarity(prot_emb,self.prototype_vectors[k])
@@ -143,4 +143,4 @@ class Prot_subgraph(nn.Module):
         loss = criterion(logits, labels) + 0.0001 * (sparse_loss + entropy_loss) +  lambda2 * sim_loss 
         # loss = criterion(logits, labels)
         # return prototype_edge , distance, prototype_activations
-        return logits, loss, prototype_activations, cluster_assignment
+        return logits, loss, prototype_edge, prototype_activations, cluster_assignment

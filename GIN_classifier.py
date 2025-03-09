@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn.conv import GINConv
+from torch_geometric.nn.conv import GINEConv
 from torch_geometric.nn.glob import global_mean_pool, global_add_pool, global_max_pool
 from torch.autograd import Variable
 
@@ -36,22 +36,22 @@ class GINNet(nn.Module):
         self.BiMap = nn.Linear(self.dense_dim, self.inter_dim, bias=False)
 
         self.gnn_layers = nn.ModuleList()
-        self.gnn_layers.append(GINConv(nn.Sequential(
+        self.gnn_layers.append(GINEConv(nn.Sequential(
             nn.Linear(input_dim, self.latent_dim[0], bias=False),
             nn.BatchNorm1d(self.latent_dim[0]),
             nn.ReLU(),
             nn.Linear(self.latent_dim[0], self.latent_dim[0], bias=False),
             nn.BatchNorm1d(self.latent_dim[0])),
-            train_eps=True))
+            train_eps=True, edge_dim=1))
 
         for i in range(1, self.num_gnn_layers):
-            self.gnn_layers.append(GINConv(nn.Sequential(
+            self.gnn_layers.append(GINEConv(nn.Sequential(
                 nn.Linear(self.latent_dim[i-1], self.latent_dim[i], bias=False),
                 nn.BatchNorm1d(self.latent_dim[i]),
                 nn.ReLU(),
                 nn.Linear(self.latent_dim[i], self.latent_dim[i], bias=False),
                 nn.BatchNorm1d(self.latent_dim[i])),
-                train_eps=True)
+                train_eps=True, edge_dim=1)
             )
 
         self.gnn_non_linear = nn.ReLU()

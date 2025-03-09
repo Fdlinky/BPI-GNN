@@ -1,12 +1,14 @@
+import time
+start = time.perf_counter()
 import argparse
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch_geometric.nn import MessagePassing
+from torch_geometric.loader import DataLoader
 import numpy as np
 import os
-import time
 import random
 import pickle
 from tqdm import tqdm
@@ -15,6 +17,7 @@ from typing import List
 from sklearn.metrics import confusion_matrix
 from GraphVAE import VAE_LL_loss
 from utilis import Calculate_TC
+
 
 criterion = nn.CrossEntropyLoss()
 
@@ -30,7 +33,7 @@ parser.add_argument('--batch_size', type=int, default=32,
                         help='input batch size for training (default: 32)')
 parser.add_argument('--iters_per_epoch', type=int, default=50,
                         help='number of iterations per each epoch (default: 50)')
-parser.add_argument('--epochs', type=int, default=310,
+parser.add_argument('--epochs', type=int, default=150,
                         help='number of epochs to train (default: 350)')
 parser.add_argument('--lr', type=float, default=0.001,
                         help='learning rate (default: 0.001)')
@@ -38,19 +41,19 @@ parser.add_argument('--seed', type=int, default=50,
                         help='random seed for splitting the dataset into 10 (default: 0)')
 parser.add_argument("--emb_normlize", type = bool, default=  False, help="mlp hidden dims")
 parser.add_argument("--data_split_ratio", type=float, default= [0.8, 0.1, 0.1], help="data seperation")
-parser.add_argument("--latent_dim", type=int, default=  [128,128,128], help="classifier hidden dims")
+parser.add_argument("--latent_dim", type=int, default=  [128,128], help="classifier hidden dims")
 parser.add_argument('--readout', type=str, default="mean", choices=["sum", "average", "max"],
                         help='Pooling for over nodes in a graph: sum or average')
 parser.add_argument('--dropout', type=float, default=0.5,
                         help='final layer dropout (default: 0.5)')
-parser.add_argument("--mlp_hidden", type=int, default=  [128,128], help="mlp hidden dims")
-parser.add_argument("--GVAE_hidden_dim", type = int, default= 120, help="mlp hidden dims")
+parser.add_argument("--mlp_hidden", type=int, default=  [64,64], help="mlp hidden dims")
+parser.add_argument("--GVAE_hidden_dim", type = int, default= 64, help="mlp hidden dims")
 parser.add_argument("--mi_weight", type=float, default= 0.001, help="classifier hidden dims")
-parser.add_argument("--weight_decay", type=float, default=0.0001, help="Adam weight decay. Default is 5*10^-5.")
+parser.add_argument("--weight_decay", type=float, default=0.001, help="Adam weight decay. Default is 5*10^-5.")
 parser.add_argument("--input_dim", type=int, default=110)
 parser.add_argument("--output_dim", type=int, default=3)
 parser.add_argument("--lambda1", type=float, default=0.001)
-parser.add_argument("--lambda2", type=float, default=0.001)
+parser.add_argument("--lambda2", type=float, default=0.0001)
 parser.add_argument("--lambda3", type=float, default=0.001)
 parser.add_argument("--num_prototypes", type=int, default=2)
 args = parser.parse_args()
@@ -64,7 +67,7 @@ if torch.cuda.is_available():
 
 # --- load data ---
 from prepare_data import get_dataloader,load_dataset
-graph_filename = "../data/pyg_dataset.pkl"
+graph_filename = "data/mm_dataset.pkl"
 pyg_dataset = pickle.load(open(graph_filename, "rb"))
 #dataset = load_dataset(pyg_dataset)
 dataloader = get_dataloader(pyg_dataset, args.batch_size, data_split_ratio=args.data_split_ratio, seed=args.seed)
@@ -77,6 +80,7 @@ decoder = GraphDecoder(args.GVAE_hidden_dim, args.input_dim).to(device)
 # --- train/load subgraph ---
 from pre_subgraph import Prot_subgraph
 from GIN_classifier import GINNet
+from sklearn.model_selection import KFold
 model = GINNet(args.input_dim, args.output_dim, args, device).to(device)
 SG_model = Prot_subgraph(device, encoder, decoder, model, args.GVAE_hidden_dim, args.num_prototypes, args.dropout).to(device)
 
@@ -100,26 +104,36 @@ def train_0(args, model, device, train_graphs, SG_model,opt):
             #print(edge.shape)
             graph_prot[k,:,:]= edge
         TC_loss = Calculate_TC(graph_prot, args.num_prototypes)
-        prototype_loss = nll + 0.001 * TC_loss
+        prototype_loss = nll + 0.01 * TC_loss
         #print(prototype_loss)
         if opt is not None:
             opt.zero_grad()
             prototype_loss.backward()    
             opt.step()
+        
+        return graph_prot
 
-def train_20(args, model, device, train_graphs, eval_graphs, test_graphs, SG_model,opt,optimizer, num_prototype, log_file, epoch):
+def train_20(args, model, device, train_graphs, SG_model,opt,optimizer, num_prototype, log_file, epoch):
         model.train()
         SG_model.train()
         encoder.train()
         decoder.train()
+
         acc_accum = 0
         num = 0
         labels_train = []
         cluster_assignments_train = []
-        for graph in train_graphs: 
-            x, edge_index, batch = graph.x.to(device), graph.edge_index.to(device), graph.batch.to(device)
-            logits, loss, prototype_activations, cluster_assignment = SG_model(graph,args.lambda2)
+        prototype_edges = []
+        prototype_activations = []
+        ids = []
 
+        for graph in train_graphs:
+            ids.append(graph.id) 
+            x, edge_index, batch = graph.x.to(device), graph.edge_index.to(device), graph.batch.to(device)
+            logits, loss, prototype_edge, prototype_activation, cluster_assignment = SG_model(graph,args.lambda2 * 2)
+            
+            prototype_activations.append(prototype_activation.detach().cpu().numpy())
+            prototype_edges.append(prototype_edge.detach().cpu().numpy())
             if optimizer is not None:
                 optimizer.zero_grad()
                 loss.backward()      
@@ -140,33 +154,8 @@ def train_20(args, model, device, train_graphs, eval_graphs, test_graphs, SG_mod
         acc_train = acc_accum/num
         print("classification loss: %f" %(loss))
         print("accuracy train: %f" %(acc_train))
-        
-        acc_eval, cluster_assignments_eval, labels_eval = evaluate(args, eval_graphs, model, SG_model, device)
-        print("accuracy eval: %f" %(acc_eval))
-        np.savez(f'../context/eval_cluster_assignments_fold_{fold_idx}.npz',
-            assignments=cluster_assignments_eval,
-            labels=labels_eval)
 
-        #acc_test, sen_test, spc_test, prc_test, f1s_test, mcc_test, cluster_assignments_test, labels_test = test(args, test_graphs, model, SG_model, device)
-        # np.savez(f'test_cluster_assignments_fold_{fold_idx}.npz',
-        #     assignments=cluster_assignments_test,
-        #     labels=labels_test)
-        # print("accuracy test: %f" %(acc_test))
-
-        with open(log_file, 'a+') as f:
-            f.write("Epoch %d, loss: %f, acc_train: %f, acc_eval: %f\n" % (epoch, loss, acc_train, acc_eval))
-        # if not os.path.exists(filename):
-        #     with open(filename, 'w') as f:
-        #         f.write("loss acc_train acc_eval acc_test sen_test spc_test prc_test f1s_test mcc_test")
-        #         f.write("\n")
-        #         f.write("%f %f %f %f %f %f %f %f %f" % (loss, acc_train, acc_eval, acc_test, sen_test, spc_test, prc_test, f1s_test, mcc_test))
-        #         f.write("\n")
-        # else:
-        #     with open(filename, 'a+') as f:
-        #         f.write("%f %f %f %f %f %f %f %f %f" % (loss, acc_train, acc_eval, acc_test, sen_test, spc_test, prc_test, f1s_test, mcc_test))
-        #         f.write("\n")
-
-        return logits, loss, prototype_activations, cluster_assignments_train, labels_train
+        return logits, loss, acc_train, prototype_edges, prototype_activations, cluster_assignments_train, labels_train, ids
 
 def evaluate(args, data, model, SG_model, device):
     model.eval()
@@ -176,9 +165,13 @@ def evaluate(args, data, model, SG_model, device):
     num = 0
     all_cluster_assignments = []
     all_labels = []
+    prototype_edges = []
+    ids = []
     for graph in data:
+        ids.append(graph.id)
         x, edge_index, batch = graph.x.to(device), graph.edge_index.to(device), graph.batch.to(device)
-        logits, loss, prototype_activations, cluster_assignment= SG_model(graph, args.lambda2)
+        logits, loss, prototype_edge, prototype_activations, cluster_assignment= SG_model(graph, args.lambda2 * 2)
+        prototype_edges.append(prototype_edge.detach().cpu().numpy())
         all_cluster_assignments.append(cluster_assignment.cpu().numpy())
         pred = logits.max(1, keepdim=True)[1]
         labels = graph.y.clone().detach().to(device)
@@ -188,7 +181,7 @@ def evaluate(args, data, model, SG_model, device):
         acc_accum += acc
         num += 1
 
-    return acc_accum / num, np.concatenate(all_cluster_assignments), np.concatenate(all_labels)
+    return acc_accum / num, np.concatenate(all_cluster_assignments), np.concatenate(all_labels), ids, prototype_edges
 
 def calc_performance_statistics(y_pred, y):
     # 计算混淆矩阵
@@ -240,9 +233,13 @@ def test(args, data, model, SG_model, device):
     num = 0
     all_cluster_assignments = []
     all_labels = []
-    for graph in data: 
+    prototype_edges = []
+    ids = []
+    for graph in data:
+        ids.append(graph.id) 
         x, edge_index, batch = graph.x.to(device), graph.edge_index.to(device), graph.batch.to(device)
-        logits, loss, prototype_activations, cluster_assignment = SG_model(graph, args.lambda2)
+        logits, loss, prototype_edge, prototype_activations, cluster_assignment = SG_model(graph, args.lambda2 * 2)
+        prototype_edges.append(prototype_edge.detach().cpu().numpy())
         #compute gradient
         pred = logits.max(1, keepdim=True)[1]
         labels = graph.y.clone().detach().to(device)
@@ -270,47 +267,87 @@ def test(args, data, model, SG_model, device):
         mcc_test = mcc_accum/num
         print(f"test accuracy: {acc_test}")
 
-    return acc_test, sen_test, spc_test, prc_test, f1s_test, mcc_test, np.concatenate(all_cluster_assignments), np.concatenate(all_labels)
+    return acc_test, sen_test, spc_test, prc_test, f1s_test, mcc_test, \
+    np.concatenate(all_cluster_assignments), np.concatenate(all_labels), ids, prototype_edges
 
+kf = KFold(n_splits=5, shuffle=True, random_state=args.seed)
+fold_idx = 0
 
-for  fold_idx in range(0,3):
+for train_index, test_index in kf.split(pyg_dataset):
+    train_dataset = [pyg_dataset[i] for i in train_index]
+    test_dataset = [pyg_dataset[i] for i in test_index]
+    eval_index = int(len(test_dataset) * 0.5)
+    eval_dataset = test_dataset[:eval_index]
+    test_dataset = test_dataset[eval_index:]
+
+    dataloader = {
+        'train': DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True),
+        'eval': DataLoader(eval_dataset, batch_size = len(eval_dataset), shuffle=False),
+        'test': DataLoader(test_dataset, batch_size = len(test_dataset), shuffle=False)
+    }
 
     encoder = GraphEncoder(args.input_dim, args.GVAE_hidden_dim, device).to(device)
     decoder = GraphDecoder(args.GVAE_hidden_dim, args.input_dim).to(device)
     model = GINNet(args.input_dim, args.output_dim, args, device).to(device)
     SG_model = Prot_subgraph(device, encoder, decoder, model, args.GVAE_hidden_dim, args.num_prototypes, args.dropout).to(device)
 
-    dataloader = get_dataloader(pyg_dataset, args.batch_size, data_split_ratio=args.data_split_ratio, seed=random.randint(0,1000))
-
     opt_params = list(decoder.parameters()) + list(encoder.parameters())
     opt = torch.optim.Adam(opt_params, lr=args.lr , weight_decay=args.weight_decay)
     params = list(model.parameters()) + list(SG_model.parameters())
     optimizer = torch.optim.Adam( params, lr =args.lr , weight_decay=args.weight_decay)
 
-    scheduler = optim.lr_scheduler.StepLR(opt, step_size=50, gamma=0.5)
+    scheduler = optim.lr_scheduler.StepLR(opt, step_size=20, gamma=0.5)
+    #scheduler = optim.lr_scheduler.ReduceLROnPlateau(opt, mode='max', factor=0.5, patience=10)
+    log_file = f"context/trainLog_{fold_idx}.txt"
 
-    log_file = f"../context/trainLog_{fold_idx}.txt"
+    # best_eval_acc = 0
+    # patience = 20
+    # no_improve_epochs = 0
 
     for epoch in range(1, args.epochs + 1):
         print('Epoch: {}'.format(epoch))
-        if epoch >=20:
-            logits, avg_loss, prototype_activations, cluster_assignments_train, labels_train = \
-            train_20(args, model, device,  dataloader['train'],dataloader['eval'],dataloader['test'], SG_model,opt,optimizer, args.num_prototypes, log_file, epoch)
-        else:
-            train_0(args, model, device,  dataloader['train'], SG_model, opt)
 
+        if epoch >=20:
+            logits, avg_loss, acc_train, prototype_edges, prototype_activations, cluster_assignments_train, labels_train, ids = \
+            train_20(args, model, device,  dataloader['train'], SG_model,opt,optimizer, args.num_prototypes, log_file, epoch)
+
+            acc_eval, cluster_assignments_eval, labels_eval, ids_eval, prototype_edges_eval = \
+            evaluate(args, dataloader['eval'], model, SG_model, device)
+
+            print("accuracy eval: %f" %(acc_eval))
+            with open(log_file, 'a+') as f:
+                f.write("Epoch %d, loss: %f, acc_train: %f, acc_eval: %f\n" % (epoch, avg_loss, acc_train, acc_eval))
+        else:
+            graph_prot = train_0(args, model, device,  dataloader['train'], SG_model, opt)
+        
         if epoch == args.epochs:  # 仅保存最后一个 epoch 的结果
-            np.savez(f'../context/train_cluster_assignments_fold_{fold_idx}.npz',
-                 assignments=cluster_assignments_train,
-                 labels=labels_train)
+            np.savez(f'context/train_fold_{fold_idx}.npz',
+                assignments=cluster_assignments_train,
+                edges=prototype_edges,
+                activations=prototype_activations,
+                labels=labels_train,
+                ids=ids)
+            np.savez(f'context/eval_fold_{fold_idx}.npz',
+                assignments=cluster_assignments_eval,
+                labels=labels_eval,
+                edges=prototype_edges_eval,
+                ids=ids_eval)
         scheduler.step()
     
-    acc_test, sen_test, spc_test, prc_test, f1s_test, mcc_test, cluster_assignments_test, labels_test = test(args, dataloader['test'], model, SG_model, device)
-    np.savez(f'../context/test_cluster_assignments_fold_{fold_idx}.npz',
+    acc_test, sen_test, spc_test, prc_test, f1s_test, mcc_test, cluster_assignments_test, labels_test, \
+    ids_test, prototype_edges_test = test(args, dataloader['test'], model, SG_model, device)
+
+    np.savez(f'context/test_fold_{fold_idx}.npz',
         assignments=cluster_assignments_test,
-        labels=labels_test)
+        labels=labels_test,
+        edges=prototype_edges_test,
+        ids=ids_test)
+    
     print("accuracy test: %f" %(acc_test))
     with open(log_file, 'a+') as f:
         f.write("acc_test: %f, sen_test: %f, spc_test: %f, prc_test: %f, f1s_test: %f, mcc_test: %f \n\n" \
                 % (acc_test, sen_test, spc_test, prc_test, f1s_test, mcc_test))
+    fold_idx += 1
 
+end = time.perf_counter()
+print(f"Time elapsed: {end - start:.6f} seconds")
